@@ -1,5 +1,5 @@
 import { electronApp } from "@electron-toolkit/utils";
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, session } from "electron";
 import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import initAppServer from "../server";
@@ -15,6 +15,8 @@ import { trySendCustomProtocol } from "./utils/protocol";
 import { initSingleLock } from "./utils/single-lock";
 import loadWindow from "./windows/load-window";
 import mainWindow from "./windows/main-window";
+import { setAppQuitting } from "./utils/lifecycle";
+import { closeTaskbarLyricWindow } from "./windows/taskbar-lyric-window";
 
 // 屏蔽报错
 process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
@@ -70,6 +72,30 @@ class MainProcess {
     // 某些 API 只有在此事件发生后才能使用
     app.whenReady().then(async () => {
       processLog.info("🚀 Application Process Startup");
+
+      // 配置 COOP/COEP/CORP 头，FFmpeg 需要
+      session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+        const responseHeaders = { ...details.responseHeaders };
+        const url = new URL(details.url);
+
+        // 桌面歌词窗口需要透明背景，必须排除严格的安全策略
+        if (url.searchParams.get("win") === "desktop-lyric") {
+          callback({ responseHeaders });
+          return;
+        }
+
+        // 同样可以解决 CORS 限制，但为了避免安全问题，等真有需要的时候再开
+        // responseHeaders["Access-Control-Allow-Origin"] = ["*"];
+        // responseHeaders["Access-Control-Allow-Headers"] = ["*"];
+
+        // COOP/COEP/CORP 配置
+        responseHeaders["Cross-Origin-Opener-Policy"] = ["same-origin"];
+        responseHeaders["Cross-Origin-Embedder-Policy"] = ["require-corp"];
+        responseHeaders["Cross-Origin-Resource-Policy"] = ["cross-origin"];
+
+        callback({ responseHeaders });
+      });
+
       // 设置应用程序名称
       electronApp.setAppUserModelId("com.imsyy.splayer");
       // 启动主服务进程
@@ -96,6 +122,11 @@ class MainProcess {
 
     // 应用被激活
     app.on("activate", () => {
+      if (isMac) {
+        mainWindow.showWindow();
+        return;
+      }
+
       const allWindows = BrowserWindow.getAllWindows();
       if (allWindows.length) {
         allWindows[0].focus();
@@ -113,11 +144,14 @@ class MainProcess {
       if (this.isQuit) return;
       event.preventDefault();
       this.isQuit = true;
+      setAppQuitting();
       (async () => {
         // 注销全部快捷键
         unregisterShortcuts();
         // 清理媒体集成资源
         shutdownMedia();
+        // 关闭任务栏歌词窗口（停止原生 watcher / service）
+        closeTaskbarLyricWindow();
         // 停止 MPV 服务
         const mpvService = MpvService.getInstance();
         try {
